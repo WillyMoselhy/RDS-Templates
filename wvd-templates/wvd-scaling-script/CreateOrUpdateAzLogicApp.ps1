@@ -8,10 +8,10 @@
 param(
 	[Parameter(mandatory = $false)]
 	[string]$AADTenantId,
-	
+
 	[Parameter(mandatory = $false)]
 	[string]$SubscriptionId,
-	
+
 	[switch]$UseARMAPI,
 
 	[Parameter(mandatory = $false)]
@@ -82,7 +82,14 @@ param(
 	[string]$WebhookURI,
 
 	[Parameter(mandatory = $false)]
-	[string]$ArtifactsURI = 'https://raw.githubusercontent.com/Azure/RDS-Templates/master/wvd-templates/wvd-scaling-script'
+	[string]$ArtifactsURI = 'https://raw.githubusercontent.com/Azure/RDS-Templates/master/wvd-templates/wvd-scaling-script',
+
+	[Parameter(mandatory = $false)]
+	[Bool]$ChangeDiskSKUOnShutdown = $true,
+
+	[Parameter(mandatory = $false)]
+	[ValidateSet('Premium_LRS', 'StandardSSD_LRS')]
+	[string]$TargetDiskSKUOnStart = 'Premium_LRS'
 )
 
 $UseRDSAPI = !$UseARMAPI
@@ -212,7 +219,9 @@ elseif ($SessionHostsList.Count -le $MinimumNumberOfRDSH) {
 	"MinimumNumberOfRDSH"           = $MinimumNumberOfRDSH
 	"LimitSecondsToForceLogOffUser" = $LimitSecondsToForceLogOffUser
 	"LogOffMessageTitle"            = $LogOffMessageTitle
-	"LogOffMessageBody"             = $LogOffMessageBody 
+	"LogOffMessageBody"             = $LogOffMessageBody
+	"ChangeDiskSKUOnShutdown"       = $ChangeDiskSKUOnShutdown
+	"TargetDiskSKUOnStart"          = $TargetDiskSKUOnStart
 }
 if ($UseRDSAPI) {
 	$RequestBody.'RDBrokerURL' = $RDBrokerURL

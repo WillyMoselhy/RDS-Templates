@@ -62,7 +62,7 @@ try {
 	if ($InvalidParams) {
 		throw "Invalid values for the following $($InvalidParams.Count) params: $($InvalidParams -join ', ')"
 	}
-	
+
 	[string]$LogAnalyticsWorkspaceId = Get-PSObjectPropVal -Obj $RqtParams -Key 'LogAnalyticsWorkspaceId'
 	[string]$LogAnalyticsPrimaryKey = Get-PSObjectPropVal -Obj $RqtParams -Key 'LogAnalyticsPrimaryKey'
 	[string]$ConnectionAssetName = Get-PSObjectPropVal -Obj $RqtParams -Key 'ConnectionAssetName'
@@ -78,6 +78,10 @@ try {
 	[int]$LimitSecondsToForceLogOffUser = $RqtParams.LimitSecondsToForceLogOffUser
 	[string]$LogOffMessageTitle = Get-PSObjectPropVal -Obj $RqtParams -Key 'LogOffMessageTitle'
 	[string]$LogOffMessageBody = Get-PSObjectPropVal -Obj $RqtParams -Key 'LogOffMessageBody'
+
+	# Note: if this is enabled script will change VHD SKU to HDD upon shutdown and back to SSD or premium SSD on start.
+	[bool] $ChangeDiskSKUOnShutdown = Get-PSObjectPropVal -Obj $RqtParams -Key 'ChangeDiskSKUOnShutdown'
+	[string] $TargetDiskSKUOnStart = Get-PSObjectPropVal -Obj $RqtParams -Key 'TargetDiskSKUOnStart'
 
 	# Note: if this is enabled, the script will assume that all the authentication is already done in current or parent scope before calling this script
 	[bool]$SkipAuth = !!(Get-PSObjectPropVal -Obj $RqtParams -Key 'SkipAuth')
@@ -133,7 +137,7 @@ try {
 		else {
 			Write-Output $WriteMessage
 		}
-			
+
 		if (!$LogAnalyticsWorkspaceId -or !$LogAnalyticsPrimaryKey) {
 			return
 		}
@@ -145,7 +149,7 @@ try {
 				'TimeStamp'    = $MessageTimeStamp
 			}
 			$json_body = ConvertTo-Json -Compress $body_obj
-			
+
 			$PostResult = Send-OMSAPIIngestionFile -customerId $LogAnalyticsWorkspaceId -sharedKey $LogAnalyticsPrimaryKey -Body $json_body -logType 'WVDTenantScale_CL' -TimeStampField 'TimeStamp' -EnvironmentName $EnvironmentName
 			if ($PostResult -ine 'Accepted') {
 				throw "Error posting to OMS: $PostResult"
@@ -160,18 +164,18 @@ try {
 		param (
 			[Parameter(Mandatory = $true)]
 			[int]$nRunningVMs,
-			
+
 			[Parameter(Mandatory = $true)]
 			[int]$nRunningCores,
-			
+
 			[Parameter(Mandatory = $true)]
 			[int]$nUserSessions,
 
 			[Parameter(Mandatory = $true)]
 			[int]$MaxUserSessionsPerVM,
-			
+
 			[switch]$InPeakHours,
-			
+
 			[Parameter(Mandatory = $true)]
 			[hashtable]$Res
 		)
@@ -189,7 +193,7 @@ try {
 			$res.nVMsToStart = $MinRunningVMs - $nRunningVMs
 			Write-Log "Number of running session host is less than minimum required. Need to start $($res.nVMsToStart) VMs"
 		}
-		
+
 		if ($InPeakHours) {
 			[double]$nUserSessionsPerCore = $nUserSessions / $nRunningCores
 			# In peak hours: check if current capacity is meeting the user demands
@@ -255,7 +259,7 @@ try {
 			if ($SessionHost.AllowNewSession -eq $AllowNewSession) {
 				return
 			}
-			
+
 			[string]$SessionHostName = $VM.SessionHostName
 			Write-Log "Update session host '$SessionHostName' to set allow new sessions to $AllowNewSession"
 			if ($PSCmdlet.ShouldProcess($SessionHostName, "Update session host to set allow new sessions to $AllowNewSession")) {
@@ -307,7 +311,7 @@ try {
 		Begin { }
 		Process {
 			TryUpdateSessionHostDrainMode -VM $VM -AllowNewSession:$true
-			
+
 			$SessionHost = $VM.SessionHost
 			[string]$SessionHostName = $VM.SessionHostName
 			if (!$SessionHost.Session) {
@@ -330,6 +334,64 @@ try {
 			$UserSessions | TryForceLogOffUser
 		}
 		End { }
+	}
+
+	function Stop-WVDSessionHost {
+		[CmdletBinding(SupportsShouldProcess)]
+		param (
+			[Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+			$VM,
+			$ChangeDiskSKUOnShutdown
+		)
+		$JobArguments = $VM,$ChangeDiskSKUOnShutdown
+		$Job = Start-Job -Name "Stop VM: $($VM.Name)" -ArgumentList $JobArguments -ScriptBlock {
+			Param(
+				$VM,
+				$ChangeDiskSKUOnShutdown
+			)
+			if ($ChangeDiskSKUOnShutdown) {
+				$SKU = New-AzDiskUpdateConfig -SkuName 'Standard_LRS' #This is the standard HDD which is cheapest.
+				$VM |
+				Select-Object -ExpandProperty StorageProfile |
+				ForEach-Object { @($_.OSDisk, $_.DataDisks) } |
+				ForEach-Object { Get-AzDisk -Name $_.Name -ResourceGroupName $VM.ResourceGroupName } |
+				ForEach-Object { Update-AzDisk -Name $_.Name -ResourceGroupName $_.ResourceGroupName -DiskUpdate $SKU }
+			}
+
+			$VM | Stop-AzVM -Force
+		}
+
+		return $Job
+	}
+	function Start-WVDSessionHost {
+		[CmdletBinding(SupportsShouldProcess)]
+		param (
+			[Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+			$VM,
+			$ChangeDiskSKUOnShutdown,
+			$TargetDiskSKUOnStart
+		)
+		$JobArguments = $VM,$ChangeDiskSKUOnShutdown,$TargetDiskSKUOnStart
+		$Job = Start-Job -Name "Start VM: $($VM.Name)" -ArgumentList $JobArguments -ScriptBlock {
+			Param(
+				$VM,
+				$ChangeDiskSKUOnShutdown,
+				$TargetDiskSKUOnStart
+			)
+			if ($ChangeDiskSKUOnShutdown) {
+				$SKU = New-AzDiskUpdateConfig -SkuName $TargetDiskSKUOnStart
+				$VM |
+				Select-Object -ExpandProperty StorageProfile |
+				ForEach-Object { @($_.OSDisk, $_.DataDisks) } |
+				ForEach-Object { Get-AzDisk -Name $_.Name -ResourceGroupName $VM.ResourceGroupName } |
+				ForEach-Object { Update-AzDisk -Name $_.Name -ResourceGroupName $_.ResourceGroupName -DiskUpdate $SKU }
+			}
+
+			$VM | Start-AzVM
+		}
+
+		return $Job
+
 	}
 
 	Set-ExecutionPolicy -ExecutionPolicy Undefined -Scope Process -Force -Confirm:$false
@@ -356,7 +418,7 @@ try {
 		# Collect the credentials from Azure Automation Account Assets
 		Write-Log "Get auto connection from asset: '$ConnectionAssetName'"
 		$ConnectionAsset = Get-AutomationConnection -Name $ConnectionAssetName
-		
+
 		# Azure auth
 		$AzContext = $null
 		try {
@@ -435,7 +497,7 @@ try {
 	Write-Log "Number of session hosts in the HostPool: $($SessionHosts.Count)"
 
 	#endregion
-	
+
 
 	#region determine if on/off peak hours
 
@@ -486,7 +548,7 @@ try {
 		[string]$SessionHostName = Get-SessionHostName -SessionHost $SessionHost
 		$VMs.Add($SessionHostName.Split('.')[0].ToLower(), @{ 'SessionHostName' = $SessionHostName; 'SessionHost' = $SessionHost; 'Instance' = $null })
 	}
-	
+
 	Write-Log 'Get all VMs, check session host status and get usage info'
 	foreach ($VMInstance in (Get-AzVM -Status)) {
 		if (!$VMs.ContainsKey($VMInstance.Name.ToLower())) {
@@ -630,7 +692,7 @@ try {
 			Write-Log "Start session host '$SessionHostName' as a background job"
 			if ($PSCmdlet.ShouldProcess($SessionHostName, 'Start session host as a background job')) {
 				# $StartSessionHostFullNames.Add($VM.SessionHost.Name, $null)
-				$StartVMjobs += ($VM.Instance | Start-AzVM -AsJob)
+				$StartVMjobs += Start-WVDSessionHost -VM $VM.Instance -ChangeDiskSKUOnShutdown $ChangeDiskSKUOnShutdown -TargetDiskSKUOnStart $TargetDiskSKUOnStart
 			}
 
 			--$Ops.nVMsToStart
@@ -700,7 +762,7 @@ try {
 		}
 		$SessionHost = $VM.SessionHost
 		[string]$SessionHostName = $VM.SessionHostName
-		
+
 		if ($SessionHost.Session -and !$LimitSecondsToForceLogOffUser) {
 			Write-Log -Warn "Session host '$SessionHostName' has $($SessionHost.Session) sessions but limit seconds to force log off user is set to 0, so will not stop any more session hosts (https://aka.ms/wvdscale#how-the-scaling-tool-works)"
 			# Note: why break ? Because the list this loop iterates through is sorted by number of sessions, if it hits this, the rest of items in the loop will also hit this
@@ -752,7 +814,7 @@ try {
 			Write-Log "Stop session host '$SessionHostName' as a background job"
 			if ($PSCmdlet.ShouldProcess($SessionHostName, 'Stop session host as a background job')) {
 				# $StopSessionHostFullNames.Add($SessionHost.Name, $null)
-				$StopVMjobs += ($VM.StopJob = $VM.Instance | Stop-AzVM -Force -AsJob)
+				$StopVMjobs += ($VM.StopJob = Stop-WVDSessionHost -VM $VM.Instance -ChangeDiskSKUOnShutdown $ChangeDiskSKUOnShutdown)
 				$VMsToStop.Add($SessionHostName, $VM)
 			}
 		}
@@ -775,11 +837,11 @@ try {
 
 			Write-Log "Force log off $($VM.UserSessions.Count) users on session host: '$SessionHostName'"
 			$VM.UserSessions | TryForceLogOffUser
-			
+
 			Write-Log "Stop session host '$SessionHostName' as a background job"
 			if ($PSCmdlet.ShouldProcess($SessionHostName, 'Stop session host as a background job')) {
 				# $StopSessionHostFullNames.Add($VM.SessionHost.Name, $null)
-				$StopVMjobs += ($VM.StopJob = $VM.Instance | Stop-AzVM -Force -AsJob)
+				$StopVMjobs += ($VM.StopJob = Stop-WVDSessionHost -VM $VM.Instance -ChangeDiskSKUOnShutdown $ChangeDiskSKUOnShutdown)
 				$VMsToStop.Add($SessionHostName, $VM)
 			}
 		}
@@ -800,9 +862,9 @@ try {
 		if (!($StopVMjobs | Where-Object { $_.State -ieq 'Running' })) {
 			break
 		}
-		
+
 		Write-Log "[Check jobs status] Total: $($StopVMjobs.Count), $(($StopVMjobs | Group-Object State | ForEach-Object { "$($_.Name): $($_.Count)" }) -join ', ')"
-		
+
 		$VMstoResetDrainModeAndSessions = @($VMsToStop.Values | Where-Object { $_.StopJob.State -ine 'Running' })
 		foreach ($VM in $VMstoResetDrainModeAndSessions) {
 			TryResetSessionHostDrainModeAndUserSessions -VM $VM
