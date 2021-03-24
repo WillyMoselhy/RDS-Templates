@@ -349,6 +349,7 @@ try {
 				$VM,
 				$ChangeDiskSKUOnShutdown
 			)
+			$VM | Stop-AzVM -Force
 			if ($ChangeDiskSKUOnShutdown) {
 				$SKU = New-AzDiskUpdateConfig -SkuName 'Standard_LRS' #This is the standard HDD which is cheapest.
 				$VM |
@@ -358,7 +359,7 @@ try {
 				ForEach-Object { Update-AzDisk -Name $_.Name -ResourceGroupName $_.ResourceGroupName -DiskUpdate $SKU }
 			}
 
-			$VM | Stop-AzVM -Force
+
 		}
 
 		return $Job
@@ -371,26 +372,33 @@ try {
 			$ChangeDiskSKUOnShutdown,
 			$TargetDiskSKUOnStart
 		)
-		$JobArguments = $VM,$ChangeDiskSKUOnShutdown,$TargetDiskSKUOnStart
+		#$JobArguments = $VM,$ChangeDiskSKUOnShutdown,$TargetDiskSKUOnStart
+		<#
 		$Job = Start-Job -Name "Start VM: $($VM.Name)" -ArgumentList $JobArguments -ScriptBlock {
+
+
 			Param(
 				$VM,
 				$ChangeDiskSKUOnShutdown,
 				$TargetDiskSKUOnStart
 			)
+		#>
 			if ($ChangeDiskSKUOnShutdown) {
+				Write-Log "[Start-WVDSessionHost] Will change disk type"
 				$SKU = New-AzDiskUpdateConfig -SkuName $TargetDiskSKUOnStart
+				Write-Log "[Start-WVDSessionHost] SKU set to $TargetDiskSKUOnStart"
 				$VM |
 				Select-Object -ExpandProperty StorageProfile |
 				ForEach-Object { @($_.OSDisk, $_.DataDisks) } |
 				ForEach-Object { Get-AzDisk -Name $_.Name -ResourceGroupName $VM.ResourceGroupName } |
 				ForEach-Object { Update-AzDisk -Name $_.Name -ResourceGroupName $_.ResourceGroupName -DiskUpdate $SKU }
+				Write-Log "[Start-WVDSessionHost] SKU updated"
 			}
+			Write-Log "[Start-WVDSessionHost] Starting VM"
+			$VM | Start-AzVM -AsJob #
+		#}
 
-			$VM | Start-AzVM
-		}
-
-		return $Job
+		#return $Job
 
 	}
 
