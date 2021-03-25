@@ -984,9 +984,3 @@ catch {
 
 	throw [System.Exception]::new($ErrMsg, $ErrContainer.Exception)
 }
-finally {
-	write-log (Get-Job | ft | out-string -Width 120)
-	write-log "Job Output"
-	$JobOutput = Get-Job | Receive-Job -Keep | Out-String
-	write-log $JobOutput
-}
