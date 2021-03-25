@@ -1,7 +1,7 @@
 ﻿
 <#
 .SYNOPSIS
-	v0.1.38
+    v0.1.38
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param (
@@ -101,7 +101,6 @@ try {
 	[string[]]$TimeDiffHrsMin = "$($TimeDifference):0".Split(':')
 
 	#endregion
-
 
 	#region helper/common functions, set exec policies, set TLS 1.2 security protocol, log rqt params
 
@@ -336,30 +335,39 @@ try {
 		End { }
 	}
 
-	function Stop-WVDSessionHost {
+	function Stop-WVDSessionHost { #NOT YET IN PRODUCTION
 		[CmdletBinding(SupportsShouldProcess)]
 		param (
 			[Parameter(Mandatory = $true, ValueFromPipeline = $true)]
 			$VM,
 			$ChangeDiskSKUOnShutdown
 		)
-		$JobArguments = $VM,$ChangeDiskSKUOnShutdown
-		$Job = Start-Job -Name "Stop VM: $($VM.Name)" -ArgumentList $JobArguments -ScriptBlock {
-			Param(
-				$VM,
-				$ChangeDiskSKUOnShutdown
-			)
-			$VM | Stop-AzVM -Force
-			if ($ChangeDiskSKUOnShutdown) {
-				$SKU = New-AzDiskUpdateConfig -SkuName 'Standard_LRS' #This is the standard HDD which is cheapest.
-				$VM |
-				Select-Object -ExpandProperty StorageProfile |
-				ForEach-Object { @($_.OSDisk, $_.DataDisks) } |
-				ForEach-Object { Get-AzDisk -Name $_.Name -ResourceGroupName $VM.ResourceGroupName } |
-				ForEach-Object { Update-AzDisk -Name $_.Name -ResourceGroupName $_.ResourceGroupName -DiskUpdate $SKU }
+		if ($ChangeDiskSKUOnShutdown) {
+
+			$VMOsDisk = $VM |
+			Select-Object -ExpandProperty StorageProfile |
+			Select-Object -ExpandProperty OsDisk | #TODO: Add logic for additional data disks [ForEach-Object { @($_.OSDisk, $_.DataDisks)] }does not
+			ForEach-Object { Get-AzDisk -Name $_.Name -ResourceGroupName $VM.Instance.ResourceGroupName }
+
+			#Write-Log "Updating SKU for Disk '$($VMOsDisk.Name)' to 'Standard_LRS"
+			$JobArguments = $VM, $ChangeDiskSKUOnShutdown, $VMOsDisk
+
+			$Job = Start-Job -Name "Stop VM: $($VM.Name) and update disk" -ArgumentList $JobArguments -ScriptBlock {
+				Param(
+					$VM,
+					$ChangeDiskSKUOnShutdown,
+					$VMOsDisk
+				)
+				"Stopping VM $($VM.Name)"
+				$VM | Stop-AzVM -Force
+				#This is the standard HDD which is cheapest.
+				"Changing SKU - $($VMOsDisk.Name)"
+				$SKU = New-AzDiskUpdateConfig -SkuName 'Standard_LRS'
+				Update-AzDisk -Name $VMOsDisk.Name -ResourceGroupName $VMOsDisk.ResourceGroupName -DiskUpdate $SKU
 			}
-
-
+		}
+		else {
+			$Job = $VM | Stop-AzVM -Force -AsJob
 		}
 
 		return $Job
@@ -374,28 +382,27 @@ try {
 		)
 		#$JobArguments = $VM,$ChangeDiskSKUOnShutdown,$TargetDiskSKUOnStart
 		<#
-		$Job = Start-Job -Name "Start VM: $($VM.Name)" -ArgumentList $JobArguments -ScriptBlock {
+        $Job = Start-Job -Name "Start VM: $($VM.Name)" -ArgumentList $JobArguments -ScriptBlock {
 
-
-			Param(
-				$VM,
-				$ChangeDiskSKUOnShutdown,
-				$TargetDiskSKUOnStart
-			)
-		#>
-			if ($ChangeDiskSKUOnShutdown) {
-				Write-Log "[Start-WVDSessionHost] Will change disk type"
-				$SKU = New-AzDiskUpdateConfig -SkuName $TargetDiskSKUOnStart
-				Write-Log "[Start-WVDSessionHost] SKU set to $TargetDiskSKUOnStart"
-				$VM |
-				Select-Object -ExpandProperty StorageProfile |
-				ForEach-Object { @($_.OSDisk, $_.DataDisks) } |
-				ForEach-Object { Get-AzDisk -Name $_.Name -ResourceGroupName $VM.ResourceGroupName } |
-				ForEach-Object { Update-AzDisk -Name $_.Name -ResourceGroupName $_.ResourceGroupName -DiskUpdate $SKU }
-				Write-Log "[Start-WVDSessionHost] SKU updated"
-			}
-			Write-Log "[Start-WVDSessionHost] Starting VM"
-			$VM | Start-AzVM -AsJob #
+            Param(
+                $VM,
+                $ChangeDiskSKUOnShutdown,
+                $TargetDiskSKUOnStart
+            )
+        #>
+		if ($ChangeDiskSKUOnShutdown) {
+			Write-Log "[Start-WVDSessionHost] Will change disk type"
+			$SKU = New-AzDiskUpdateConfig -SkuName $TargetDiskSKUOnStart
+			Write-Log "[Start-WVDSessionHost] SKU set to $TargetDiskSKUOnStart"
+			$VM |
+			Select-Object -ExpandProperty StorageProfile |
+			ForEach-Object { @($_.OSDisk, $_.DataDisks) } |
+			ForEach-Object { Get-AzDisk -Name $_.Name -ResourceGroupName $VM.ResourceGroupName } |
+			ForEach-Object { Update-AzDisk -Name $_.Name -ResourceGroupName $_.ResourceGroupName -DiskUpdate $SKU }
+			Write-Log "[Start-WVDSessionHost] SKU updated"
+		}
+		Write-Log "[Start-WVDSessionHost] Starting VM"
+		$VM | Start-AzVM -AsJob #
 		#}
 
 		#return $Job
@@ -418,7 +425,6 @@ try {
 	}
 
 	#endregion
-
 
 	#region azure auth, ctx
 
@@ -459,7 +465,6 @@ try {
 	}
 
 	#endregion
-
 
 	#region validate host pool, validate / update HostPool load balancer type, ensure there is at least 1 session host, get num of user sessions
 
@@ -506,7 +511,6 @@ try {
 
 	#endregion
 
-
 	#region determine if on/off peak hours
 
 	# Convert local time, begin peak time & end peak time from UTC to local time
@@ -535,7 +539,6 @@ try {
 	}
 
 	#endregion
-
 
 	#region get all session hosts, VMs & user sessions info and compute workload
 
@@ -646,7 +649,6 @@ try {
 
 	#endregion
 
-
 	#region determine number of session hosts to start/stop if any
 
 	# Now that we have all the info about the session hosts & their usage, figure how many session hosts to start/stop depending on in/off peak hours and the demand [Ops = operations to perform]
@@ -659,7 +661,6 @@ try {
 	Set-nVMsToStartOrStop -nRunningVMs $nRunningVMs -nRunningCores $nRunningCores -nUserSessions $nUserSessions -MaxUserSessionsPerVM $HostPool.MaxSessionLimit -InPeakHours:$InPeakHours -Res $Ops
 
 	#endregion
-
 
 	#region start any session hosts if need to
 
@@ -700,7 +701,19 @@ try {
 			Write-Log "Start session host '$SessionHostName' as a background job"
 			if ($PSCmdlet.ShouldProcess($SessionHostName, 'Start session host as a background job')) {
 				# $StartSessionHostFullNames.Add($VM.SessionHost.Name, $null)
-				$StartVMjobs += Start-WVDSessionHost -VM $VM.Instance -ChangeDiskSKUOnShutdown $ChangeDiskSKUOnShutdown -TargetDiskSKUOnStart $TargetDiskSKUOnStart
+				if ($ChangeDiskSKUOnShutdown) {
+					$SKU = New-AzDiskUpdateConfig -SkuName $TargetDiskSKUOnStart
+
+					$VM.Instance |
+					Select-Object -ExpandProperty StorageProfile |
+					Select-Object -ExpandProperty OsDisk | #TODO: Add logic for additional data disks [ForEach-Object { @($_.OSDisk, $_.DataDisks)] }does not
+					ForEach-Object { Get-AzDisk -Name $_.Name -ResourceGroupName $VM.Instance.ResourceGroupName } |
+					ForEach-Object {
+						Write-Log "Updating SKU for Disk '$($_.Name)' to $TargetDiskSKUOnStart"
+						Update-AzDisk -Name $_.Name -ResourceGroupName $_.ResourceGroupName -DiskUpdate $SKU
+					}
+				}
+				$StartVMjobs += ($VM.Instance | Start-AzVM -AsJob)
 			}
 
 			--$Ops.nVMsToStart
@@ -726,26 +739,25 @@ try {
 		return
 
 		<#
-		# //todo if not going to poll for status here, then no need to keep track of the list of session hosts that were started
-		Write-Log "Wait for $($StartSessionHostFullNames.Count) session hosts to be available"
-		$StartTime = Get-Date
-		while ($true) {
-			if ((Get-Date).Subtract($StartTime).TotalSeconds -ge $StatusCheckTimeOut) {
-				throw "Status check timed out. Taking more than $StatusCheckTimeOut seconds"
-			}
-			$SessionHostsToCheck = @(Get-AzWvdSessionHost -HostPoolName $HostPoolName -ResourceGroupName $ResourceGroupName | Where-Object { $StartSessionHostFullNames.ContainsKey($_.Name) })
-			Write-Log "[Check session hosts status] Total: $($SessionHostsToCheck.Count), $(($SessionHostsToCheck | Group-Object Status | ForEach-Object { "$($_.Name): $($_.Count)" }) -join ', ')"
-			if (!($SessionHostsToCheck | Where-Object { $_.Status -notin $DesiredRunningStates })) {
-				break
-			}
-			Start-Sleep -Seconds $SessionHostStatusCheckSleepSecs
-		}
-		return
-		#>
+        # //todo if not going to poll for status here, then no need to keep track of the list of session hosts that were started
+        Write-Log "Wait for $($StartSessionHostFullNames.Count) session hosts to be available"
+        $StartTime = Get-Date
+        while ($true) {
+            if ((Get-Date).Subtract($StartTime).TotalSeconds -ge $StatusCheckTimeOut) {
+                throw "Status check timed out. Taking more than $StatusCheckTimeOut seconds"
+            }
+            $SessionHostsToCheck = @(Get-AzWvdSessionHost -HostPoolName $HostPoolName -ResourceGroupName $ResourceGroupName | Where-Object { $StartSessionHostFullNames.ContainsKey($_.Name) })
+            Write-Log "[Check session hosts status] Total: $($SessionHostsToCheck.Count), $(($SessionHostsToCheck | Group-Object Status | ForEach-Object { "$($_.Name): $($_.Count)" }) -join ', ')"
+            if (!($SessionHostsToCheck | Where-Object { $_.Status -notin $DesiredRunningStates })) {
+                break
+            }
+            Start-Sleep -Seconds $SessionHostStatusCheckSleepSecs
+        }
+        return
+        #>
 	}
 
 	#endregion
-
 
 	#region stop any session hosts if need to
 
@@ -822,7 +834,23 @@ try {
 			Write-Log "Stop session host '$SessionHostName' as a background job"
 			if ($PSCmdlet.ShouldProcess($SessionHostName, 'Stop session host as a background job')) {
 				# $StopSessionHostFullNames.Add($SessionHost.Name, $null)
-				$StopVMjobs += ($VM.StopJob = Stop-WVDSessionHost -VM $VM.Instance -ChangeDiskSKUOnShutdown $ChangeDiskSKUOnShutdown)
+				#$StopVMjobs += ($VM.StopJob = Stop-WVDSessionHost -VM $VM.Instance -ChangeDiskSKUOnShutdown $ChangeDiskSKUOnShutdown)
+
+				$StopVMjobs += ($VM.StopJob = $VM.Instance | Stop-AzVM -Force -AsJob)
+				Wait-Job $VM.StopJob
+				if ($ChangeDiskSKUOnShutdown) {
+					$SKU = New-AzDiskUpdateConfig -SkuName 'Standard_LRS' #This is the standard HDD which is cheapest.
+
+					$VM.Instance |
+					Select-Object -ExpandProperty StorageProfile |
+					Select-Object -ExpandProperty OsDisk | #TODO: Add logic for additional data disks [ForEach-Object { @($_.OSDisk, $_.DataDisks)] }does not
+					ForEach-Object { Get-AzDisk -Name $_.Name -ResourceGroupName $VM.Instance.ResourceGroupName } |
+					ForEach-Object {
+						Write-Log "Updating SKU for Disk '$($_.Name)' to 'Standard_LRS"
+						Update-AzDisk -Name $_.Name -ResourceGroupName $_.ResourceGroupName -DiskUpdate $SKU
+					}
+				}
+
 				$VMsToStop.Add($SessionHostName, $VM)
 			}
 		}
@@ -849,7 +877,20 @@ try {
 			Write-Log "Stop session host '$SessionHostName' as a background job"
 			if ($PSCmdlet.ShouldProcess($SessionHostName, 'Stop session host as a background job')) {
 				# $StopSessionHostFullNames.Add($VM.SessionHost.Name, $null)
-				$StopVMjobs += ($VM.StopJob = Stop-WVDSessionHost -VM $VM.Instance -ChangeDiskSKUOnShutdown $ChangeDiskSKUOnShutdown)
+				$StopVMjobs += ($VM.StopJob = $VM.Instance | Stop-AzVM -Force -AsJob)
+				Wait-Job $VM.StopJob
+				if ($ChangeDiskSKUOnShutdown) {
+					$SKU = New-AzDiskUpdateConfig -SkuName 'Standard_LRS' #This is the standard HDD which is cheapest.
+
+					$VM.Instance |
+					Select-Object -ExpandProperty StorageProfile |
+					Select-Object -ExpandProperty OsDisk | #TODO: Add logic for additional data disks [ForEach-Object { @($_.OSDisk, $_.DataDisks)] }does not
+					ForEach-Object { Get-AzDisk -Name $_.Name -ResourceGroupName $VM.Instance.ResourceGroupName } |
+					ForEach-Object {
+						Write-Log "Updating SKU for Disk '$($_.Name)' to 'Standard_LRS"
+						Update-AzDisk -Name $_.Name -ResourceGroupName $_.ResourceGroupName -DiskUpdate $SKU
+					}
+				}
 				$VMsToStop.Add($SessionHostName, $VM)
 			}
 		}
@@ -886,6 +927,7 @@ try {
 	[string]$StopVMJobsStatusInfo = "[Check jobs status] Total: $($StopVMjobs.Count), $(($StopVMjobs | Group-Object State | ForEach-Object { "$($_.Name): $($_.Count)" }) -join ', ')"
 	Write-Log $StopVMJobsStatusInfo
 
+
 	$VMsToStop.Values | TryResetSessionHostDrainModeAndUserSessions
 
 	if ((Get-Date).Subtract($StartTime).TotalSeconds -ge $StatusCheckTimeOut) {
@@ -902,25 +944,25 @@ try {
 	return
 
 	<#
-	# //todo if not going to poll for status here, then no need to keep track of the list of session hosts that were stopped
-	Write-Log "Wait for $($StopSessionHostFullNames.Count) session hosts to be unavailable"
-	[array]$SessionHostsToCheck = @()
-	$StartTime = Get-Date
-	while ($true) {
-		if ((Get-Date).Subtract($StartTime).TotalSeconds -ge $StatusCheckTimeOut) {
-			throw "Status check timed out. Taking more than $StatusCheckTimeOut seconds"
-		}
-		$SessionHostsToCheck = @(Get-AzWvdSessionHost -HostPoolName $HostPoolName -ResourceGroupName $ResourceGroupName | Where-Object { $StopSessionHostFullNames.ContainsKey($_.Name) })
-		Write-Log "[Check session hosts status] Total: $($SessionHostsToCheck.Count), $(($SessionHostsToCheck | Group-Object Status | ForEach-Object { "$($_.Name): $($_.Count)" }) -join ', ')"
-		if (!($SessionHostsToCheck | Where-Object { $_.Status -in $DesiredRunningStates })) {
-			break
-		}
-		Start-Sleep -Seconds $SessionHostStatusCheckSleepSecs
-	}
+    # //todo if not going to poll for status here, then no need to keep track of the list of session hosts that were stopped
+    Write-Log "Wait for $($StopSessionHostFullNames.Count) session hosts to be unavailable"
+    [array]$SessionHostsToCheck = @()
+    $StartTime = Get-Date
+    while ($true) {
+        if ((Get-Date).Subtract($StartTime).TotalSeconds -ge $StatusCheckTimeOut) {
+            throw "Status check timed out. Taking more than $StatusCheckTimeOut seconds"
+        }
+        $SessionHostsToCheck = @(Get-AzWvdSessionHost -HostPoolName $HostPoolName -ResourceGroupName $ResourceGroupName | Where-Object { $StopSessionHostFullNames.ContainsKey($_.Name) })
+        Write-Log "[Check session hosts status] Total: $($SessionHostsToCheck.Count), $(($SessionHostsToCheck | Group-Object Status | ForEach-Object { "$($_.Name): $($_.Count)" }) -join ', ')"
+        if (!($SessionHostsToCheck | Where-Object { $_.Status -in $DesiredRunningStates })) {
+            break
+        }
+        Start-Sleep -Seconds $SessionHostStatusCheckSleepSecs
+    }
 
-	# Make sure session hosts are allowing new user sessions & update them to allow if not
-	$SessionHostsToCheck | Update-SessionHostToAllowNewSession
-	#>
+    # Make sure session hosts are allowing new user sessions & update them to allow if not
+    $SessionHostsToCheck | Update-SessionHostToAllowNewSession
+    #>
 
 	#endregion
 }
@@ -941,4 +983,10 @@ catch {
 	# $ErrMsg += ($WebHookData | Format-List -Force | Out-String)
 
 	throw [System.Exception]::new($ErrMsg, $ErrContainer.Exception)
+}
+finally {
+	write-log (Get-Job | ft | out-string -Width 120)
+	write-log "Job Output"
+	$JobOutput = Get-Job | Receive-Job -Keep | Out-String
+	write-log $JobOutput
 }
